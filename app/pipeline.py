@@ -48,7 +48,13 @@ _vader = SentimentIntensityAnalyzer()
 
 @lru_cache(maxsize=1)
 def _nlp():
-    return spacy.load("en_core_web_sm")
+    # en_core_web_md, not _sm: verified 2026-09-28 that _sm mistags real company names as
+    # NORP (nationality/political-group) instead of ORG - e.g. "Rivian shares surged 8%..."
+    # tags "Rivian" as NORP under _sm, ORG under _md, reproduced directly with both models
+    # loaded side by side. Subject extraction is this project's whole job, so that's a
+    # correctness bug for exactly the kind of company name a real financial article uses,
+    # not a hypothetical edge case - worth _md's larger download for the accuracy.
+    return spacy.load("en_core_web_md")
 
 
 def _normalize(text: str) -> str:

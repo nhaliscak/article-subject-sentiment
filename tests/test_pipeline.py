@@ -25,6 +25,18 @@ def _find(results, name):
     raise AssertionError(f"{name!r} not found among subjects: {[r['subject'] for r in results]}")
 
 
+def test_ner_tags_a_real_company_name_as_org_not_norp():
+    # Regression coverage: en_core_web_sm (the original model) mistagged "Rivian" as NORP
+    # (nationality/political-group) instead of ORG - reproduced directly comparing sm vs md
+    # on this exact sentence, 2026-09-28. Subject extraction is this project's whole job, so
+    # this is a correctness bug on a real company name, not a hypothetical - en_core_web_md
+    # (the current model, see app/pipeline.py's _nlp()) gets it right.
+    results = analyze("Rivian shares surged 8% after the company reported record deliveries. "
+                       "Rivian said production would ramp through the fourth quarter.")
+    rivian = _find(results, "Rivian")
+    assert rivian["label"] == "ORG"
+
+
 def test_extracts_known_subjects():
     results = analyze(MIXED_SENTIMENT_ARTICLE)
     names = {r["subject"] for r in results}

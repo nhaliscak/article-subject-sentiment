@@ -15,7 +15,7 @@ distinguishes them. It takes raw article text as input — it does not ingest
 news itself.
 
 **NLP only.** No LLM calls, no generative summarization, no model training.
-Entity extraction is spaCy NER (`en_core_web_sm`). Sentiment is VADER
+Entity extraction is spaCy NER (`en_core_web_md`). Sentiment is VADER
 (`vaderSentiment`), the same lexicon-based tool `market-sentiment-service`
 already uses. Extractive summaries are a hand-rolled TF-IDF sentence ranking
 (see `app/pipeline.py`) — no scikit-learn dependency, just stdlib math.
@@ -103,22 +103,43 @@ and real VADER — no mocking of the NLP):
   query-param-overrides-body-field behavior for `financial_mode`, empty-text
   rejection, and the URL endpoint's error handling for an unreachable host.
 
-**Assumed / unverified** — flagging honestly rather than hoping:
+**Real-world spot-check performed** (2026-09-28, against 5 live articles
+pulled from Alpaca's News API - real headlines, not hand-written samples).
+Result: subject-level sentiment/summary/financial-relevance all worked as
+designed, but entity extraction on real headline-style text has real,
+reproduced rough edges the hand-written test articles didn't surface:
 
-- **Real-world article variety.** All tests use short, hand-written sample
-  articles with a small number of clearly-named subjects. Real articles are
-  messier: `en_core_web_sm` is the smallest spaCy English model and its NER
-  is noticeably weaker on less common or newer company names. For example,
-  while building this, `en_core_web_sm` mistagged "Rivian" as `NORP`
-  (nationality/political-group) instead of `ORG` in a test sentence — a real
-  miss, not a hypothetical. If subject recall on real financial news turns
-  out to matter more than the smaller download/runtime footprint,
-  `en_core_web_md` or `en_core_web_lg` (swap the model name in
-  `app/pipeline.py`) is the first thing to try.
-- **The alias-merging heuristic** (step 2 above) hasn't been stress-tested
-  against tricky real-world aliasing (nicknames, abbreviations, subsidiary
-  vs. parent company naming). It handles the common cases in the tests;
-  it's a substring-overlap heuristic, not coreference resolution.
+- **Switched to `en_core_web_md`** (was `en_core_web_sm`) after confirming
+  the smaller model mistags real company names - e.g. "Rivian shares surged
+  8%..." tags "Rivian" as `NORP` under `_sm`, `ORG` under `_md`, reproduced
+  directly comparing both models on the same sentence. Regression test:
+  `test_ner_tags_a_real_company_name_as_org_not_norp`.
+- **Entity span boundaries are noisy on headline-style text.** Real examples
+  from the spot-check: `"Apple Hit"` (verb swallowed into the entity),
+  `"Meta Stock"` / `"SpaceX Events"` (a following common noun swallowed in),
+  and worst, `"Goldman Questions AI Spending Payoff"` - an entire headline
+  clause captured as one `ORG` entity. spaCy's NER expects normal prose
+  capitalization; headline title-case (every word capitalized) removes the
+  signal it normally uses to find entity boundaries. Not fixed here - would
+  need headline-specific preprocessing or entity-boundary post-filtering,
+  which is a real design task, not a quick patch.
+- **Cross-mention label inconsistency defeats the alias merge.** Reproduced
+  directly: in one real article, spaCy tags `"Mark Zuckerberg"` as `PERSON`
+  in the first sentence and the later standalone `"Zuckerberg"` as `ORG` in
+  the second - two mentions of the same real person, two different NER
+  labels within the same document. `_merge_entities`' label-must-match check
+  (deliberate - it's what stops merging, say, a person named Washington with
+  the org "Washington Post") is doing exactly what it's designed to do here;
+  the actual root cause is spaCy's own per-mention label inconsistency, not
+  a merge-logic bug. Fixing this needs cross-mention label reconciliation or
+  spaCy's experimental coreference resolution (already noted as the upgrade
+  path in `_merge_entities`'s own docstring) - flagged as a follow-up task,
+  not fixed in this pass.
+- **The alias-merging heuristic** (step 2 above), aside from the label-
+  mismatch case just described, handles the common cases in the tests; it's
+  a substring-overlap heuristic, not coreference resolution, so unusual
+  nicknames/abbreviations/subsidiary-vs-parent naming can still under- or
+  over-merge.
 - **The financial-relevance keyword/ticker list** is a reasonable starting
   set, not validated against a large labeled corpus of financial vs.
   non-financial subjects. It will miss financial language it doesn't
@@ -148,7 +169,8 @@ following has been verified, only reasoned about:
   silent build failure. If a wheel-only aarch64 build turns out to be
   needed later (e.g. for a smaller image), that's a follow-up, not done
   here.
-- `en_core_web_sm` itself is a pure data package (no native code), so the
+- `en_core_web_md` itself is a pure data package (no native code, just
+  larger than `_sm` - includes word vectors), so the
   model download step should be architecture-independent regardless of the
   above.
 - **Recommendation:** build and run the Docker image on the actual RK1
@@ -161,7 +183,7 @@ following has been verified, only reasoned about:
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m spacy download en_core_web_sm
+.venv/bin/python -m spacy download en_core_web_md
 .venv/bin/python -m pytest tests/ -v
 .venv/bin/uvicorn app.main:app --reload
 ```
@@ -176,7 +198,13 @@ docker run -p 8000:8000 article-subject-sentiment
 ## Kubernetes
 
 `k8s/deployment.yaml`, `k8s/service.yaml`, and `k8s/argocd-application.yaml`
-are bare-bones manifests matching the pattern of other small services in
-this fleet. Update the `image:` field in `deployment.yaml` and the
-`repoURL:` in `argocd-application.yaml` once this is pushed and built for
-real — both currently point at placeholders.
+match the real conventions used by every other app on this cluster
+(confirmed 2026-09-28 via `kubectl` against the live, healthy `tradebot-hub`
+Application - see that file's own comment). `.github/workflows/
+build-and-deploy.yml` builds and pushes this multi-arch (amd64+arm64, via
+QEMU on GitHub's runners) on every push to `main`, mirroring `tradebot_hub`'s
+own proven workflow.
+
+```bash
+kubectl apply -f k8s/argocd-application.yaml   # one-time; Argo CD takes it from here
+```

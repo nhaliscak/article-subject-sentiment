@@ -16,7 +16,9 @@ spec:
     spec:
       containers:
         - name: article-subject-sentiment
-          # TODO: replace with the image you build and push from this repo.
+          # Registry path confirmed 2026-09-28 to match the exact convention every other
+          # image on this cluster uses (kubectl get deploy -o jsonpath=... across the
+          # tradebot namespace) - .github/workflows/build-and-deploy.yml bumps this tag.
           image: ghcr.io/nhaliscak/article-subject-sentiment:latest
           ports:
             - containerPort: 8000

@@ -1,3 +1,7 @@
+# Matches the real Application conventions used by every other app on this cluster
+# (confirmed 2026-09-28 by reading the live tradebot-hub Application via kubectl): project
+# default, SSH-form repoURL, retry/backoff policy. Deployed into its own namespace (not
+# `tradebot`) since this is a general-purpose NLP service, not tradebot-specific.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -6,7 +10,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/nhaliscak/article-subject-sentiment.git
+    repoURL: git@github.com:nhaliscak/article-subject-sentiment.git
     targetRevision: main
     path: k8s
   destination:
@@ -18,3 +22,9 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m
