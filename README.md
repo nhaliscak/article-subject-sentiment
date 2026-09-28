@@ -158,25 +158,24 @@ reproduced rough edges the hand-written test articles didn't surface:
 with no access to a Turing Pi RK1 or any other ARM64 machine, so none of the
 following has been verified, only reasoned about:
 
-- `spacy`, its `numpy`/`blis`/`thinc` dependencies, and `vaderSentiment` all
-  install cleanly via prebuilt wheels on x86_64 (verified: this is exactly
-  what happened building this repo). Whether PyPI has prebuilt
-  `manylinux_aarch64` wheels for the pinned dependency versions is not
-  something this environment could check.
-- If aarch64 wheels are missing for some dependency, pip will fall back to
-  building from source, which is why the Dockerfile installs
-  `build-essential` defensively — this trades a larger image for avoiding a
-  silent build failure. If a wheel-only aarch64 build turns out to be
-  needed later (e.g. for a smaller image), that's a follow-up, not done
-  here.
+- **Update (2026-09-28): the `linux/arm64` build itself is now confirmed to
+  complete.** `.github/workflows/build-and-deploy.yml` ran for real on push
+  (`gh run watch`) and its `linux/arm64` build - via QEMU emulation on
+  GitHub's amd64 runners - succeeded, meaning `spacy`/`numpy`/`blis`/`thinc`/
+  `vaderSentiment` all either found prebuilt `manylinux_aarch64` wheels or
+  successfully built from source under `build-essential` (the CI log wasn't
+  inspected line-by-line to tell which). Either way, the image *builds* for
+  arm64 - what's still unconfirmed is whether it *runs* correctly on real
+  RK1 hardware, since QEMU emulation proves the build step, not runtime
+  behavior (a subtly different NEON/vector-instruction code path, e.g., could
+  still behave differently on real silicon than under emulation).
 - `en_core_web_md` itself is a pure data package (no native code, just
-  larger than `_sm` - includes word vectors), so the
-  model download step should be architecture-independent regardless of the
-  above.
-- **Recommendation:** build and run the Docker image on the actual RK1
-  hardware (or an aarch64 emulation layer like `docker buildx --platform
-  linux/arm64`) before trusting this in the cluster. Don't assume it "just
-  works" from this README.
+  larger than `_sm` - includes word vectors), so the model download step
+  was never really a risk here regardless of the above.
+- **Recommendation:** run the Docker image on the actual RK1 hardware itself
+  (not just build it) before trusting this in the cluster. The build
+  succeeding under QEMU is real evidence, not a guess - it's just not the
+  same claim as "runs correctly on real hardware."
 
 ## Running locally
 
