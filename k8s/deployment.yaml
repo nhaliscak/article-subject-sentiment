@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: article-subject-sentiment
+  labels:
+    app: article-subject-sentiment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: article-subject-sentiment
+  template:
+    metadata:
+      labels:
+        app: article-subject-sentiment
+    spec:
+      containers:
+        - name: article-subject-sentiment
+          # TODO: replace with the image you build and push from this repo.
+          image: ghcr.io/nhaliscak/article-subject-sentiment:latest
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
