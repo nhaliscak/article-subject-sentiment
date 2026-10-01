@@ -1,4 +1,26 @@
-from app.pipeline import analyze
+from app.pipeline import analyze, _merge_cross_label_surname_matches
+
+# Frozen verbatim from a real Benzinga article pulled live via Alpaca's News API
+# (2026-09-27, symbols=META). Real headline-style capitalization reproduces both the
+# entity-boundary noise and the cross-mention PERSON/ORG label split documented in
+# README.md's findings section - not a hand-written worst case.
+REAL_HEADLINE_ZUCKERBERG = (
+    "Mark Zuckerberg Loses Nearly $9 Billion in One Day as Meta Stock Slides 4% "
+    "After Goldman Questions AI Spending Payoff"
+)
+REAL_BODY_ZUCKERBERG = (
+    "Meta stock fell 4%, wiping nearly $9 billion from Zuckerberg’s wealth after "
+    "Goldman Sachs warned AI spending faces a massive revenue hurdle."
+)
+
+# Frozen verbatim real headlines (Alpaca News API, 2026-09-27) reproducing the same
+# headline-boundary noise on different subjects/verbs.
+REAL_HEADLINE_APPLE = (
+    "Apple Hit With $5.7 Billion Patent Verdict Over iPhone, Apple Watch Haptics"
+)
+REAL_HEADLINE_SPACEX = (
+    "Elon Musk's Path to Trillionaire Stalls Ahead of Key Tesla and SpaceX Events"
+)
 
 MIXED_SENTIMENT_ARTICLE = """
 Apple shares surged after the company posted record iPhone revenue and raised
@@ -110,3 +132,82 @@ def test_headline_is_included_in_analysis_context():
     )
     names = {r["subject"] for r in results}
     assert "Apple" in names
+
+
+def test_headline_boundary_noise_is_trimmed_goldman_and_meta():
+    # Regression for the real spot-check finding: "Goldman Questions AI Spending
+    # Payoff" captured as one ORG span, and "Meta Stock" swallowing a common noun -
+    # both from the same real headline (see REAL_HEADLINE_ZUCKERBERG above).
+    results = analyze(REAL_BODY_ZUCKERBERG, headline=REAL_HEADLINE_ZUCKERBERG)
+    names = {r["subject"] for r in results}
+    assert "Meta" in names
+    assert "Meta Stock" not in names
+    assert not any("Questions" in n or "Payoff" in n for n in names)
+
+
+def test_headline_boundary_noise_is_trimmed_apple_hit():
+    # Regression for the real spot-check finding: "Apple Hit" (a verb swallowed
+    # into the entity span).
+    results = analyze("The verdict followed a lengthy trial.", headline=REAL_HEADLINE_APPLE)
+    names = {r["subject"] for r in results}
+    assert "Apple" in names
+    assert "Apple Hit" not in names
+
+
+def test_headline_boundary_noise_is_trimmed_spacex_events():
+    # Regression for the real spot-check finding: "SpaceX Events" (a following
+    # common noun swallowed into the entity span).
+    results = analyze("The mission proceeded on schedule.", headline=REAL_HEADLINE_SPACEX)
+    names = {r["subject"] for r in results}
+    assert "SpaceX" in names
+    assert "SpaceX Events" not in names
+
+
+def test_headline_style_detection_does_not_affect_normal_prose():
+    # The boundary trim must stay scoped to headline-style text - normal-prose
+    # entities like "Nexlon Corp" must keep their full canonical name untouched.
+    results = analyze(MIXED_SENTIMENT_ARTICLE)
+    nexlon = _find(results, "Nexlon Corp")
+    assert nexlon["mentions"] == 2
+
+
+def test_cross_mention_label_split_is_merged_zuckerberg():
+    # Regression for the real spot-check finding: spaCy tags "Mark Zuckerberg" as
+    # PERSON in the headline and the later standalone "Zuckerberg" as ORG in the
+    # body - two mentions of the same person, split across labels.
+    results = analyze(REAL_BODY_ZUCKERBERG, headline=REAL_HEADLINE_ZUCKERBERG)
+    zuck = _find(results, "Mark Zuckerberg")
+    assert zuck["label"] == "PERSON"
+    assert zuck["mentions"] == 2
+
+
+def test_cross_label_surname_merge_is_narrow():
+    # Direct unit test of the merge guard itself (bypassing spaCy, whose real-world
+    # tagging of ambiguous names like "Washington" varies): a single-token group
+    # must only merge into a multi-token cross-label group when it matches the
+    # LAST word, not any word - otherwise a person entity that happens to share the
+    # FIRST word of an org's name (the "Washington" / "Washington Post" case the
+    # existing label-must-match rule was built to avoid) would wrongly merge.
+    person_washington = {
+        "canonical": "Washington", "label": "PERSON", "norm": "washington",
+        "aliases_norm": {"washington"}, "spans": ["span_a"],
+    }
+    org_washington_post = {
+        "canonical": "Washington Post", "label": "ORG", "norm": "washington post",
+        "aliases_norm": {"washington post"}, "spans": ["span_b"],
+    }
+    result = _merge_cross_label_surname_matches([person_washington, org_washington_post])
+    assert len(result) == 2
+
+    person_mark_zuckerberg = {
+        "canonical": "Mark Zuckerberg", "label": "PERSON", "norm": "mark zuckerberg",
+        "aliases_norm": {"mark zuckerberg"}, "spans": ["span_a"],
+    }
+    org_zuckerberg = {
+        "canonical": "Zuckerberg", "label": "ORG", "norm": "zuckerberg",
+        "aliases_norm": {"zuckerberg"}, "spans": ["span_b"],
+    }
+    result = _merge_cross_label_surname_matches([person_mark_zuckerberg, org_zuckerberg])
+    assert len(result) == 1
+    assert result[0]["canonical"] == "Mark Zuckerberg"
+    assert result[0]["spans"] == ["span_a", "span_b"]

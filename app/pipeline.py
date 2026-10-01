@@ -18,6 +18,7 @@ from functools import lru_cache
 from typing import Optional
 
 import spacy
+from spacy.tokens import Span
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # Entity types we treat as "subjects" per the brief: companies, people, products,
@@ -42,6 +43,14 @@ TICKER_RE = re.compile(
 
 _MIN_ALIAS_LEN = 3  # ponytail: guards against short-name false substring merges (e.g. "Bo"/"Bob")
 _SUMMARY_MAX_SENTENCES = 3
+
+# Headline title-case capitalizes every real word, not just proper nouns, which is what
+# breaks spaCy's boundary signal (see _trim_headline_entity). Detection looks only at
+# words this long so short function words ("of", "as", "AI") that are legitimately
+# lowercase-or-not either way don't skew the ratio.
+_HEADLINE_MIN_WORDS = 3
+_HEADLINE_MIN_WORD_LEN = 4
+_HEADLINE_CAP_RATIO = 0.7
 
 _vader = SentimentIntensityAnalyzer()
 
@@ -101,7 +110,88 @@ def _merge_entities(ents):
                     "spans": [ent],
                 }
             )
-    return groups
+    return _merge_cross_label_surname_matches(groups)
+
+
+def _merge_cross_label_surname_matches(groups):
+    """Reconcile spaCy's own per-mention label inconsistency for one person
+    (e.g. "Mark Zuckerberg" tagged PERSON, a later standalone "Zuckerberg"
+    tagged ORG - reproduced directly on a real article). This isn't a
+    merge-logic bug (the label-must-match rule above is doing its job); it's
+    spaCy tagging the same surname differently mention to mention.
+
+    Deliberately narrow: only merges a single-token group into a multi-token
+    group when the token equals the multi-token group's LAST word, and one
+    side is PERSON. Matching on the trailing word only (not any substring)
+    is what keeps a person named "Washington" from merging into the org
+    "Washington Post" (last word "post" != "washington") while still
+    catching the surname case (last word "zuckerberg" == "zuckerberg").
+    """
+    consumed = set()
+    n = len(groups)
+    for i in range(n):
+        for j in range(i + 1, n):
+            g, other = groups[i], groups[j]
+            if id(g) in consumed or id(other) in consumed:
+                continue
+            if g["label"] == other["label"] or "PERSON" not in (g["label"], other["label"]):
+                continue
+            long_g, short_g = (
+                (g, other) if len(g["norm"].split()) >= len(other["norm"].split()) else (other, g)
+            )
+            short_tokens = short_g["norm"].split()
+            long_tokens = long_g["norm"].split()
+            if (
+                len(short_tokens) == 1
+                and len(long_tokens) >= 2
+                and len(short_tokens[0]) >= _MIN_ALIAS_LEN
+                and short_tokens[0] == long_tokens[-1]
+            ):
+                long_g["aliases_norm"] |= short_g["aliases_norm"]
+                long_g["spans"].extend(short_g["spans"])
+                consumed.add(id(short_g))
+    return [g for g in groups if id(g) not in consumed]
+
+
+def _is_headline_style(sent) -> bool:
+    """True if `sent` capitalizes essentially every real word (headline
+    title case) rather than just proper nouns/sentence starts (normal
+    prose). The first token is skipped since sentence-initial capitalization
+    happens in normal prose too and isn't evidence either way.
+    """
+    words = [
+        t for t in sent[1:] if t.is_alpha and len(t.text) >= _HEADLINE_MIN_WORD_LEN
+    ]
+    if len(words) < _HEADLINE_MIN_WORDS:
+        return False
+    capitalized = sum(1 for t in words if t.text[0].isupper())
+    return capitalized / len(words) >= _HEADLINE_CAP_RATIO
+
+
+def _trim_headline_entity(ent, lower_sent_doc):
+    """spaCy's NER (and its POS tagger - checked directly, it has the same
+    blind spot) over-extends entity spans on headline-style text into a
+    following verb/noun clause, because title case capitalizes every real
+    word rather than just proper nouns (e.g. "Apple Hit", "Goldman Questions
+    AI Spending Payoff" as one ORG span - both reproduced on real articles).
+
+    Fix: re-tag the same sentence fully lowercased. That strips the
+    headline-casing bias, so a trailing common noun/verb goes back to
+    tagging as non-PROPN even though it also erases the FIRST token's own
+    PROPN signal - irrelevant here, since the original cased NER already
+    anchored the entity's start there. Extend from that anchor only while
+    the lowercased re-tag still calls each next token PROPN; cut at the
+    first one it doesn't.
+    """
+    sent = ent.sent
+    offset = ent.start - sent.start
+    end_offset = ent.end - sent.start
+    new_end_offset = offset + 1
+    while new_end_offset < end_offset and lower_sent_doc[new_end_offset].pos_ == "PROPN":
+        new_end_offset += 1
+    if new_end_offset == end_offset:
+        return ent
+    return Span(ent.doc, ent.start, sent.start + new_end_offset, label=ent.label_)
 
 
 def _sentences_for_group(group):
@@ -205,7 +295,15 @@ def analyze(text: str, headline: Optional[str] = None, financial_mode: bool = Fa
     doc = _nlp()(full_text)
 
     ents = [e for e in doc.ents if e.label_ in SUBJECT_LABELS]
-    groups = _merge_entities(ents)
+    headline_lower_docs = {}
+    trimmed_ents = []
+    for e in ents:
+        if _is_headline_style(e.sent):
+            if e.sent.start not in headline_lower_docs:
+                headline_lower_docs[e.sent.start] = _nlp()(e.sent.text.lower())
+            e = _trim_headline_entity(e, headline_lower_docs[e.sent.start])
+        trimmed_ents.append(e)
+    groups = _merge_entities(trimmed_ents)
     sentence_scores = _tfidf_sentence_scores(doc)
 
     results = []
