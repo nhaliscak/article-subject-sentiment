@@ -19,7 +19,7 @@ spec:
           # Registry path confirmed 2026-09-28 to match the exact convention every other
           # image on this cluster uses (kubectl get deploy -o jsonpath=... across the
           # tradebot namespace) - .github/workflows/build-and-deploy.yml bumps this tag.
-          image: ghcr.io/nhaliscak/article-subject-sentiment:5bf30e046e0c2b8f97b7f1d3aabc7eeb1b3d9fbb
+          image: ghcr.io/nhaliscak/article-subject-sentiment:26150baa8c0f4cb1c46f797ab52d0db13fe96838
           ports:
             - containerPort: 8000
           readinessProbe:
