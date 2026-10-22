@@ -43,12 +43,22 @@ Response:
       "label": "ORG",
       "mentions": 3,
       "summary": "extractive sentences pulled verbatim from the article",
-      "sentiment": {"compound": 0.72, "label": "positive"},
+      "sentiment": {"compound": 0.72, "label": "positive", "mixed": false},
+      "evidence": [{"text": "sentence scored", "compound": 0.72, "inferred": false}],
       "financial_relevant": true
     }
   ]
 }
 ```
+
+`mode` (body field or `?mode=` query param, query wins; also on `/analyze/url`):
+
+- `standard` (default): ORG / PERSON / PRODUCT subjects, full output.
+- `detailed`: also GPE, NORP, EVENT, LAW, FAC, WORK_OF_ART (countries, nationalities,
+  events, laws, facilities, named works). Noisier by nature; the response echoes `mode`.
+- `financial_lite`: implies the financial filter and returns only
+  `subject`, `label`, `mentions`, `sentiment` (VADER score/label/mixed) per finance-related
+  subject. No summary or evidence. Still NLP-only.
 
 When `financial_mode` is true, subjects not flagged `financial_relevant` are
 dropped from the list entirely (it's a filter, not just a label).
@@ -87,8 +97,14 @@ Liveness/readiness check.
 4. Those sentences are ranked by a TF-IDF score computed over the whole
    article and the top 3 are kept, in original order, as the extractive
    summary.
-5. VADER runs on the subject's own sentence text (not the whole article) to
-   get a subject-localized sentiment score.
+5. Sentiment is VADER per sentence, averaged (not run on the concatenated
+   text, where one strong sentence saturates the score). If a sentence names
+   several different subjects, only the clause holding the subject is scored
+   ("Apple rose, but Nexlon fell"). Sentences with no entity that open with a
+   pronoun / "the company" right after a sentence about a subject are
+   attributed to it (`inferred: true` in `evidence`; previous-sentence
+   heuristic, not coreference). `sentiment.mixed` is true when the subject has
+   both clearly positive and clearly negative sentences.
 6. `financial_relevant` is true if the subject's sentences contain a ticker
    pattern (`$AAPL`, `(NASDAQ: AAPL)`) or common financial-market vocabulary
    (earnings, guidance, shares, analyst, price target, etc.).

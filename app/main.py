@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 
 import requests
 from bs4 import BeautifulSoup
@@ -6,6 +6,8 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from .pipeline import analyze
+
+Mode = Literal["standard", "detailed", "financial_lite"]
 
 app = FastAPI(
     title="article-subject-sentiment",
@@ -17,11 +19,13 @@ class AnalyzeRequest(BaseModel):
     headline: Optional[str] = None
     text: str
     financial_mode: bool = False
+    mode: Mode = "standard"
 
 
 class AnalyzeUrlRequest(BaseModel):
     url: str
     financial_mode: bool = False
+    mode: Mode = "standard"
 
 
 @app.get("/health")
@@ -35,19 +39,22 @@ def _resolve_financial_mode(query_value: Optional[bool], body_value: bool) -> bo
 
 @app.post("/analyze")
 def analyze_endpoint(
-    req: AnalyzeRequest, financial_mode: Optional[bool] = Query(None)
+    req: AnalyzeRequest, financial_mode: Optional[bool] = Query(None),
+    mode: Optional[Mode] = Query(None),
 ):
     if not req.text or not req.text.strip():
         raise HTTPException(status_code=422, detail="text must not be empty")
 
     fm = _resolve_financial_mode(financial_mode, req.financial_mode)
-    subjects = analyze(req.text, headline=req.headline, financial_mode=fm)
-    return {"headline": req.headline, "financial_mode": fm, "subjects": subjects}
+    m = mode or req.mode
+    subjects = analyze(req.text, headline=req.headline, financial_mode=fm, mode=m)
+    return {"headline": req.headline, "financial_mode": fm, "mode": m, "subjects": subjects}
 
 
 @app.post("/analyze/url")
 def analyze_url_endpoint(
-    req: AnalyzeUrlRequest, financial_mode: Optional[bool] = Query(None)
+    req: AnalyzeUrlRequest, financial_mode: Optional[bool] = Query(None),
+    mode: Optional[Mode] = Query(None),
 ):
     # ponytail: simple <p>-tag scrape, not a real readability/boilerplate
     # extractor. Fine for plain article pages; will pull nav/ad text on
@@ -74,5 +81,6 @@ def analyze_url_endpoint(
         title = soup.title.string.strip()
 
     fm = _resolve_financial_mode(financial_mode, req.financial_mode)
-    subjects = analyze(text, headline=title, financial_mode=fm)
-    return {"url": req.url, "headline": title, "financial_mode": fm, "subjects": subjects}
+    m = mode or req.mode
+    subjects = analyze(text, headline=title, financial_mode=fm, mode=m)
+    return {"url": req.url, "headline": title, "financial_mode": fm, "mode": m, "subjects": subjects}

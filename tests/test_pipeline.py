@@ -211,3 +211,49 @@ def test_cross_label_surname_merge_is_narrow():
     assert len(result) == 1
     assert result[0]["canonical"] == "Mark Zuckerberg"
     assert result[0]["spans"] == ["span_a", "span_b"]
+
+
+def test_two_subjects_in_one_sentence_are_scored_per_clause():
+    results = analyze("Apple shares surged on record sales, but Nexlon Corp tumbled after missing earnings.")
+    assert _find(results, "Apple")["sentiment"]["compound"] > 0.05
+    assert _find(results, "Nexlon Corp")["sentiment"]["compound"] < -0.05
+
+
+def test_pronoun_sentence_is_attributed_to_previous_subject():
+    results = analyze("Nexlon Corp missed earnings expectations. It also warned of weak demand and layoffs.")
+    ev = _find(results, "Nexlon Corp")["evidence"]
+    assert [e["inferred"] for e in ev] == [False, True]
+    assert "warned of weak demand" in _find(results, "Nexlon Corp")["summary"]
+
+
+def test_mixed_flag_when_subject_gets_opposing_sentences():
+    results = analyze("Apple shares surged on record sales. Later, Apple was sued and faced a terrible, "
+                      "damaging verdict.")
+    assert _find(results, "Apple")["sentiment"]["mixed"] is True
+
+
+GEO_ARTICLE = (
+    "Tesla shares fell after China imposed new tariffs on electric vehicles. "
+    "Analysts at Goldman Sachs cut their price target, citing weak demand in China."
+)
+
+
+def test_detailed_mode_adds_geopolitical_entities():
+    std = {r["subject"] for r in analyze(GEO_ARTICLE)}
+    det = {r["subject"]: r for r in analyze(GEO_ARTICLE, mode="detailed")}
+    assert "China" not in std
+    assert det["China"]["label"] == "GPE"
+    assert std <= set(det)
+
+
+def test_financial_lite_is_compact_and_finance_only():
+    res = analyze(MIXED_RELEVANCE_ARTICLE, mode="financial_lite")
+    assert res and all(set(r) == {"subject", "label", "mentions", "sentiment"} for r in res)
+    assert "Red Cross" not in {r["subject"] for r in res}
+    assert all(r["sentiment"]["label"] in ("positive", "negative", "neutral") for r in res)
+
+
+def test_unknown_mode_rejected():
+    import pytest
+    with pytest.raises(ValueError):
+        analyze("Apple rose.", mode="bogus")

@@ -26,9 +26,9 @@ def test_analyze_returns_subjects_with_expected_shape():
     assert len(body["subjects"]) >= 1
 
     subject = body["subjects"][0]
-    for key in ("subject", "label", "mentions", "summary", "sentiment", "financial_relevant"):
+    for key in ("subject", "label", "mentions", "summary", "sentiment", "evidence", "financial_relevant"):
         assert key in subject
-    assert set(subject["sentiment"].keys()) == {"compound", "label"}
+    assert set(subject["sentiment"].keys()) == {"compound", "label", "mixed"}
 
 
 def test_analyze_rejects_empty_text():
@@ -62,3 +62,15 @@ def test_analyze_url_rejects_unreachable_host():
         "/analyze/url", json={"url": "http://this-domain-should-not-resolve.invalid/article"}
     )
     assert resp.status_code == 502
+
+
+def test_mode_query_overrides_body_and_is_echoed():
+    resp = client.post("/analyze?mode=financial_lite", json={"text": ARTICLE_TEXT, "mode": "detailed"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "financial_lite"
+    assert all("summary" not in s for s in body["subjects"])
+
+
+def test_invalid_mode_is_422():
+    assert client.post("/analyze", json={"text": ARTICLE_TEXT, "mode": "nope"}).status_code == 422

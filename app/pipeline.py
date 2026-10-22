@@ -25,6 +25,10 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 # organizations. GPE/EVENT/etc. are deliberately excluded to keep results to
 # genuinely discussable subjects rather than every named thing in the text.
 SUBJECT_LABELS = {"ORG", "PERSON", "PRODUCT"}
+# "detailed" mode adds these: countries/cities, nationalities/groups, events, laws, facilities,
+# named works. Kept out of the default because they make results noisy (every "U.S." is a subject).
+DETAILED_EXTRA_LABELS = {"GPE", "NORP", "EVENT", "LAW", "FAC", "WORK_OF_ART"}
+MODES = ("standard", "detailed", "financial_lite")
 
 FINANCIAL_KEYWORDS = {
     "earnings", "revenue", "guidance", "shares", "share", "stock", "stocks",
@@ -53,6 +57,20 @@ _HEADLINE_MIN_WORD_LEN = 4
 _HEADLINE_CAP_RATIO = 0.7
 
 _vader = SentimentIntensityAnalyzer()
+
+# Splits a sentence into clauses so a sentence naming two subjects with opposite fortunes
+# ("Apple rose, but Nexlon fell") is scored per subject instead of smeared across both.
+_CLAUSE_SPLIT_RE = re.compile(
+    r";|,?\s+\b(?:but|while|whereas|although|though|yet|meanwhile)\b|,\s+(?:and|as|with)\s",
+    re.IGNORECASE,
+)
+
+# A sentence that opens with one of these, right after a sentence about a subject, is read as
+# still being about that subject (cheap anaphora, not real coreference).
+_PERSON_ANAPHORA = {"he", "she", "his", "her", "him"}
+_THING_ANAPHORA = {"it", "its", "they", "their", "the company", "the firm", "the group",
+                   "the stock", "the shares", "the maker", "the business"}
+_MIXED_THRESHOLD = 0.05
 
 
 @lru_cache(maxsize=1)
@@ -254,15 +272,68 @@ def _summarize(subject_sents, sentence_scores):
     return " ".join(s.text.strip() for s in top_in_order)
 
 
-def _sentiment_for_text(text: str) -> dict:
-    compound = _vader.polarity_scores(text)["compound"]
+def _clause_text(sent, spans, multi_subject: bool) -> str:
+    """Text to score for `spans` within `sent`: the whole sentence normally, but only the
+    clause(s) holding the subject when the sentence names several different subjects."""
+    if not multi_subject:
+        return sent.text
+    base = sent.start_char
+    cuts = [0] + [m.end() for m in _CLAUSE_SPLIT_RE.finditer(sent.text)] + [len(sent.text)]
+    bounds = list(zip(cuts, cuts[1:]))
+    picked = []
+    for span in spans:
+        for lo, hi in bounds:
+            if lo <= span.start_char - base < hi and (lo, hi) not in picked:
+                picked.append((lo, hi))
+    return " ".join(sent.text[lo:hi].strip() for lo, hi in sorted(picked))
+
+
+def _infer_anaphora(doc, span_group):
+    """Attach subject-less sentences that open with a pronoun / "the company" to the subject
+    of the sentence before them. Returns {sent.start: (sent, group)}.
+
+    ponytail: previous-sentence heuristic (prefers the grammatical subject), not coreference.
+    Misattributes when the pronoun really points two sentences back or at a non-subject.
+    """
+    sents = list(doc.sents)
+    inferred = {}
+    for prev, cur in zip(sents, sents[1:]):
+        if any(sp.sent.start == cur.start for sp in span_group):
+            continue
+        head = " ".join(t.lower_ for t in cur[:3])
+        words = head.split()
+        person = words and words[0] in _PERSON_ANAPHORA
+        thing = words and (words[0] in _THING_ANAPHORA or " ".join(words[:2]) in _THING_ANAPHORA)
+        if not (person or thing):
+            continue
+        cands = [sp for sp in span_group
+                 if sp.sent.start == prev.start and (sp.label_ == "PERSON") == bool(person)]
+        if not cands:
+            continue
+        best = next((sp for sp in cands if sp.root.dep_ in ("nsubj", "nsubjpass")), cands[0])
+        inferred[cur.start] = (cur, span_group[best])
+    return inferred
+
+
+def _label(compound: float) -> str:
     if compound >= 0.05:
-        label = "positive"
-    elif compound <= -0.05:
-        label = "negative"
-    else:
-        label = "neutral"
-    return {"compound": compound, "label": label}
+        return "positive"
+    if compound <= -0.05:
+        return "negative"
+    return "neutral"
+
+
+def _aggregate_sentiment(evidence: list) -> dict:
+    """Mean of per-sentence VADER compounds (concatenating text lets one strong sentence
+    saturate the score). `mixed` flags a subject praised in one place and slammed in another,
+    which a single averaged number would hide."""
+    scores = [e["compound"] for e in evidence]
+    compound = round(sum(scores) / len(scores), 4)
+    return {
+        "compound": compound,
+        "label": _label(compound),
+        "mixed": any(c >= _MIXED_THRESHOLD for c in scores) and any(c <= -_MIXED_THRESHOLD for c in scores),
+    }
 
 
 def _is_financially_relevant(subject_text: str, sentence_text: str) -> bool:
@@ -272,7 +343,8 @@ def _is_financially_relevant(subject_text: str, sentence_text: str) -> bool:
     return any(kw in combined for kw in FINANCIAL_KEYWORDS)
 
 
-def analyze(text: str, headline: Optional[str] = None, financial_mode: bool = False) -> list:
+def analyze(text: str, headline: Optional[str] = None, financial_mode: bool = False,
+            mode: str = "standard") -> list:
     """Run the full pipeline and return a list of subject results, each:
 
         {
@@ -280,21 +352,28 @@ def analyze(text: str, headline: Optional[str] = None, financial_mode: bool = Fa
           "label": "ORG" | "PERSON" | "PRODUCT",
           "mentions": int,
           "summary": str,          # extractive, from the article's own sentences
-          "sentiment": {"compound": float, "label": str},
+          "sentiment": {"compound": float, "label": str, "mixed": bool},
+          "evidence": [{"text": str, "compound": float, "inferred": bool}],
           "financial_relevant": bool,
         }
+
+    mode="detailed" also keeps DETAILED_EXTRA_LABELS entities; mode="financial_lite" implies the
+    financial filter and returns only subject/label/mentions/sentiment.
 
     Sorted by mention count, descending. If financial_mode is True, subjects
     not flagged as financially relevant are dropped entirely rather than
     just tagged, since the point of the mode is to act as a filter.
     """
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
     if not text or not text.strip():
         return []
 
     full_text = f"{headline.strip()}. {text}" if headline and headline.strip() else text
     doc = _nlp()(full_text)
 
-    ents = [e for e in doc.ents if e.label_ in SUBJECT_LABELS]
+    labels = SUBJECT_LABELS | DETAILED_EXTRA_LABELS if mode == "detailed" else SUBJECT_LABELS
+    ents = [e for e in doc.ents if e.label_ in labels]
     headline_lower_docs = {}
     trimmed_ents = []
     for e in ents:
@@ -306,19 +385,38 @@ def analyze(text: str, headline: Optional[str] = None, financial_mode: bool = Fa
     groups = _merge_entities(trimmed_ents)
     sentence_scores = _tfidf_sentence_scores(doc)
 
+    # span -> its group, so a sentence can tell how many *different* subjects it names.
+    span_group = {sp: g for g in groups for sp in g["spans"]}
+    inferred = _infer_anaphora(doc, span_group)
+    subjects_in_sent = {}
+    for sp, g in span_group.items():
+        subjects_in_sent.setdefault(sp.sent.start, set()).add(id(g))
+
     results = []
     for group in groups:
         sents = _sentences_for_group(group)
         if not sents:
             continue
-        sentence_text = " ".join(s.text for s in sents)
+        evidence = []
+        for sent in sents:
+            spans = [sp for sp in group["spans"] if sp.sent.start == sent.start]
+            text_scored = _clause_text(sent, spans, len(subjects_in_sent[sent.start]) > 1)
+            evidence.append({"text": sent.text.strip(), "compound": _vader.polarity_scores(text_scored)["compound"],
+                             "inferred": False})
+        inferred_sents = [c for c, g in inferred.values() if g is group]
+        for sent in inferred_sents:
+            evidence.append({"text": sent.text.strip(), "compound": _vader.polarity_scores(sent.text)["compound"],
+                             "inferred": True})
+        all_sents = sorted(sents + inferred_sents, key=lambda x: x.start)
+        sentence_text = " ".join(s.text for s in all_sents)
         results.append(
             {
                 "subject": group["canonical"],
                 "label": group["label"],
                 "mentions": len(group["spans"]),
-                "summary": _summarize(sents, sentence_scores),
-                "sentiment": _sentiment_for_text(sentence_text),
+                "summary": _summarize(all_sents, sentence_scores),
+                "sentiment": _aggregate_sentiment(evidence),
+                "evidence": evidence,
                 "financial_relevant": _is_financially_relevant(
                     group["canonical"], sentence_text
                 ),
@@ -327,7 +425,16 @@ def analyze(text: str, headline: Optional[str] = None, financial_mode: bool = Fa
 
     results.sort(key=lambda r: r["mentions"], reverse=True)
 
-    if financial_mode:
+    if financial_mode or mode == "financial_lite":
         results = [r for r in results if r["financial_relevant"]]
+
+    if mode == "financial_lite":
+        # Compact view: just who, how often, and the sentiment score. Same VADER numbers as the
+        # full mode, minus summary/evidence.
+        results = [
+            {"subject": r["subject"], "label": r["label"], "mentions": r["mentions"],
+             "sentiment": r["sentiment"]}
+            for r in results
+        ]
 
     return results
